@@ -237,7 +237,8 @@ def search_goodreads(title, authors, series_name_position=None, language=None):
         search_results = \
         goodreads_graphql.query_graphql(list_book_suggestions_query(search_query=query))['getSearchSuggestions'][
             'edges']
-        for book in search_results:
+        # loop through non null results
+        for book in filter(lambda x:x, search_results):
             book = book['node']
             goodreads_edition_id = re.search('goodreads.com/book/show/(\d+)', book['webUrl']).group(1)
             result = goodreads_graphql.query_graphql(book_by_id_query(goodreads_edition_id))['getBookByLegacyId']
@@ -320,9 +321,8 @@ def main():
                                  language=lang_code_to_name[book['lang_code']] if book['lang_code'] in lang_code_to_name else None)
         except:
             sleep(10)
-            hits = search_goodreads(book['title'], book['authors'],
-                                 series_name_position=list(book['series'].values())[0] if book['series'] else None,
-                                 language=lang_code_to_name[book['lang_code']] if book['lang_code'] in lang_code_to_name else None)
+            print("error searching for", book['title'], book['url'])
+            continue
         if hits:
             print(book['title'])
             print(' ' * 2 + book['url'])
