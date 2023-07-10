@@ -231,7 +231,6 @@ def search_goodreads(title, authors, series_name_position=None, language=None):
                     parse_series_position(series_name_position[1]) for author in authors]
     found_books = []
     for query in queries[:20]:
-        print(query)
         search_results = \
         goodreads_graphql.query_graphql(list_book_suggestions_query(search_query=query))['getSearchSuggestions'][
             'edges']
