@@ -6,37 +6,34 @@ import time
 from time import sleep
 import requests
 import json
-from bs4 import BeautifulSoup
 import os
 import pickle
 from appdirs import user_data_dir
 import re
+import html
 
+
+lang_code_to_name = {'ENG': 'English'}
 # this script does create some files under this directory
 appname = "search_goodreads"
 appauthor = "Eshuigugu"
 data_dir = user_data_dir(appname, appauthor)
-lang_code_to_name = {'ENG': 'English'}
+cookies_filepath = os.path.join(data_dir, 'cookies.pkl')
+mam_blacklist_filepath = os.path.join(data_dir, 'blacklisted_ids.txt')
 
 if not os.path.isdir(data_dir):
     os.makedirs(data_dir)
-sess_filepath = os.path.join(data_dir, 'session.pkl')
 
-mam_blacklist_filepath = os.path.join(data_dir, 'blacklisted_ids.txt')
 if os.path.exists(mam_blacklist_filepath):
     with open(mam_blacklist_filepath, 'r') as f:
         blacklist = set([int(x.strip()) for x in f.readlines()])
 else:
     blacklist = set()
 
-if os.path.exists(sess_filepath):
-    sess = pickle.load(open(sess_filepath, 'rb'))
-    # only take the cookies
-    cookies = sess.cookies
-    sess = requests.Session()
+sess = requests.Session()
+if os.path.exists(cookies_filepath):
+    cookies = pickle.load(open(cookies_filepath, 'rb'))
     sess.cookies = cookies
-else:
-    sess = requests.Session()
 
 
 # The payload to include in the request (the GraphQL query)
@@ -234,6 +231,7 @@ def search_goodreads(title, authors, series_name_position=None, language=None):
                     parse_series_position(series_name_position[1]) for author in authors]
     found_books = []
     for query in queries[:20]:
+        print(query)
         search_results = \
         goodreads_graphql.query_graphql(list_book_suggestions_query(search_query=query))['getSearchSuggestions'][
             'edges']
@@ -254,6 +252,7 @@ def search_goodreads(title, authors, series_name_position=None, language=None):
 
 
 def get_mam_requests(limit=5000):
+    url = 'https://www.myanonamouse.net/tor/json/loadRequests.php'
     keepGoing = True
     start_idx = 0
     req_books = []
@@ -261,7 +260,6 @@ def get_mam_requests(limit=5000):
     # fetch list of requests to search for
     while keepGoing:
         time.sleep(1)
-        url = 'https://www.myanonamouse.net/tor/json/loadRequests.php'
         headers = {}
         # fill in mam_id for first run
         # headers['cookie'] = 'mam_id='
@@ -287,53 +285,62 @@ def get_mam_requests(limit=5000):
         keepGoing = min(total_items, limit) > start_idx and not \
             {x['id'] for x in req_books}.intersection(blacklist)
 
-    # saving the session lets you reuse the cookies returned by MAM which means you won't have to manually update the mam_id value as often
-    with open(sess_filepath, 'wb') as f:
-        pickle.dump(sess, f)
+    # save cookies for later. yum
+    with open(cookies_filepath, 'wb') as f:
+        pickle.dump(sess.cookies, f)
 
     with open(mam_blacklist_filepath, 'a') as f:
         for book in req_books:
             f.write(str(book['id']) + '\n')
             book['url'] = 'https://www.myanonamouse.net/tor/viewRequest.php/' + \
                           str(book['id'])[:-5] + '.' + str(book['id'])[-5:]
-            book['title'] = BeautifulSoup(book["title"], features="lxml").text
-            if book['series']:
-                book['series'] = {k: [BeautifulSoup(x, features="lxml").text for x in v] for k, v in
-                                  json.loads(book['series']).items()}
+            book['title'] = html.unescape(str(book['title']))
             if book['authors']:
                 book['authors'] = [author for k, author in json.loads(book['authors']).items()]
     return req_books
 
 
+def should_search_for_book(mam_book):
+    return mam_book['cat_name'].startswith('Ebooks ')\
+           and mam_book['filled'] == 0\
+           and mam_book['torsatch'] == 0\
+           and mam_book['category'] != 79\
+           and mam_book['id'] not in blacklist
+
+
+def pretty_print_hits(mam_book, hits):
+    print(mam_book['title'])
+    print(' ' * 2 + mam_book['url'])
+    if len(hits) > 5:
+        print(' ' * 2 + f'got {len(hits)} hits')
+        print(' ' * 2 + f'showing first 5 results')
+        hits = hits[:5]
+    for hit in hits:
+        print(' ' * 2 + hit["title"])
+        print(' ' * 4 + hit['url'])
+    print()
+
+
+def search_for_mam_book(mam_book):
+    series_name_position = list(map(html.unescape, list(json.loads(mam_book['series']).values())[0])) if mam_book['series']\
+        else None
+    book_language = lang_code_to_name[mam_book['lang_code']] if mam_book['lang_code'] in lang_code_to_name else None
+    try:
+        return search_goodreads(mam_book['title'], mam_book['authors'],
+                                series_name_position=series_name_position,
+                                language=book_language)
+    except:
+        print("error searching for", mam_book['title'], mam_book['url'])
+        sleep(10)
+        return
+
+
 def main():
     req_books = get_mam_requests()
-
-    req_books_reduced = [x for x in req_books if
-                         x['cat_name'].startswith('Ebooks ')
-                         and x['filled'] == 0
-                         and x['torsatch'] == 0
-                         and x['category'] != 79  # remove magazines/newspapers
-                         and x['id'] not in blacklist]
-    for book in req_books_reduced:
-        try:
-            hits = search_goodreads(book['title'], book['authors'],
-                                 series_name_position=list(book['series'].values())[0] if book['series'] else None,
-                                 language=lang_code_to_name[book['lang_code']] if book['lang_code'] in lang_code_to_name else None)
-        except:
-            sleep(10)
-            print("error searching for", book['title'], book['url'])
-            continue
+    for book in filter(should_search_for_book, req_books):
+        hits = search_for_mam_book(book)
         if hits:
-            print(book['title'])
-            print(' ' * 2 + book['url'])
-            if len(hits) > 5:
-                print(' ' * 2 + f'got {len(hits)} hits')
-                print(' ' * 2 + f'showing first 5 results')
-                hits = hits[:5]
-            for hit in hits:
-                print(' ' * 2 + hit["title"])
-                print(' ' * 4 + hit['url'])
-            print()
+            pretty_print_hits(book, hits)
 
 
 goodreads_graphql = GoodreadsGraphQL()
